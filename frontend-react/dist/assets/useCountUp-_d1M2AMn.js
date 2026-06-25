@@ -1,0 +1,1 @@
+import{r as a}from"./index-CJipW2nV.js";function l(e,n=900){const[u,r]=a.useState(0);return a.useEffect(()=>{if(!e||e===0){r(0);return}const c=performance.now();let t;function o(i){const m=i-c,s=Math.min(m/n,1),f=1-Math.pow(1-s,3);r(Math.round(e*f)),s<1&&(t=requestAnimationFrame(o))}return t=requestAnimationFrame(o),()=>cancelAnimationFrame(t)},[e,n]),u}export{l as u};

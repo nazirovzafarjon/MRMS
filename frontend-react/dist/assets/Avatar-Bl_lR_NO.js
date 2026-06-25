@@ -1,0 +1,1 @@
+import{g as e,d as l,j as i}from"./index-CJipW2nV.js";function c({name:a,size:s="table",className:r=""}){const t=e(a),o=l(a);return s==="profile"?i.jsx("div",{className:`profile-avatar ${r}`,children:t}):i.jsx("div",{className:`table-avatar avatar-${o} ${r}`,children:t})}export{c as A};
