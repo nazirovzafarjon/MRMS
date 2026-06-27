@@ -1,7 +1,7 @@
 # MRMS — Medical Record Management System
 
-> **Client:** CareTrack Clinic  
-> **Module:** BTEC Level 3 — Unit 25: Full Stack Development  
+> **Client:** CareTrack Clinic
+> **Module:** BTEC Level 3 — Unit 25: Full Stack Development
 > **Architecture:** Decoupled REST API (Express 5 + Node.js) ↔ SPA (React 18 + Vite 5)
 
 ![Node.js](https://img.shields.io/badge/Node.js-22%2B-339933?style=flat-square&logo=node.js&logoColor=white)
@@ -15,346 +15,269 @@
 
 ## Table of Contents
 
-1. [System Architecture](#1-system-architecture)
-2. [Why React + Vite? — The Critical Performance Shift](#2-why-react--vite--the-critical-performance-shift)
-3. [Role-Based Access Control (RBAC) & Authentication](#3-role-based-access-control-rbac--authentication)
-4. [Special Functional Workflows](#4-special-functional-workflows)
-5. [Folder Structure](#5-folder-structure)
-6. [Tech Stack](#6-tech-stack)
-7. [API Endpoint Reference](#7-api-endpoint-reference)
-8. [Installation & Setup Guide](#8-installation--setup-guide)
-9. [Demo Credentials](#9-demo-credentials)
+1. [Business Goal](#1-business-goal)
+2. [System Architecture](#2-system-architecture)
+3. [Data Model](#3-data-model)
+4. [Roles & Access Control](#4-roles--access-control)
+5. [Authentication](#5-authentication)
+6. [API Endpoint Reference](#6-api-endpoint-reference)
+7. [Key Workflows](#7-key-workflows)
+8. [Folder Structure](#8-folder-structure)
+9. [Tech Stack](#9-tech-stack)
+10. [Installation & Setup](#10-installation--setup)
+11. [Demo Credentials](#11-demo-credentials)
 
 ---
 
-## 1. System Architecture
+## 1. Business Goal
 
-MRMS follows a **fully decoupled architecture**: the backend and frontend are two independent processes that communicate exclusively over HTTP. This separation means either layer can be rebuilt, replaced, or scaled without touching the other.
+CareTrack Clinic runs day-to-day patient care across four staff roles — administrators, clinicians, receptionists, and doctors — who previously coordinated patient records, diagnoses, and doctor schedules through disconnected spreadsheets and paper charts. MRMS replaces that with a single web dashboard that each role can use for the slice of clinical data relevant to their job, while keeping a single source of truth for the clinic as a whole.
 
-```
-┌──────────────────────────────────────────────────────────────┐
-│                        BROWSER                               │
-│                                                              │
-│   React 18 SPA (Vite dev server — port 5173)                 │
-│   ┌────────────┐  ┌──────────────┐  ┌───────────────────┐   │
-│   │  AuthCtx   │  │  apiClient   │  │  React Router v6  │   │
-│   │ (JWT store)│  │ (fetch+Bearer│  │  (lazy-loaded      │   │
-│   │            │  │  token)      │  │   routes)          │   │
-│   └─────┬──────┘  └──────┬───────┘  └───────────────────┘   │
-│         │                │  /api/* (proxied by Vite)         │
-└─────────┼────────────────┼──────────────────────────────────-┘
-          │                │
-          ▼                ▼
-┌──────────────────────────────────────────────────────────────┐
-│              Express 5 REST API — port 5000                  │
-│                                                              │
-│   app.js (global JWT gate)                                   │
-│   ┌──────────────────────────────────────────────────────┐   │
-│   │  POST /api/auth/login  ←── only public endpoint      │   │
-│   │  All other /api/*      ←── JWT required              │   │
-│   └──────────────────────────────────────────────────────┘   │
-│                                                              │
-│   Route modules → Controllers → In-Memory DB (db.js)        │
-│   authRoutes   doctorRoutes   patientRoutes                  │
-│   diseaseRoutes  diseaseCatalogRoutes  diseaseRequestRoutes  │
-│   dashboardRoutes                                            │
-│                                                              │
-│   In-Memory Data Store (db.js)                               │
-│   ┌──────────────────────────────────────────────────┐       │
-│   │  users[]  doctors[]  patients[]  diseases[]       │       │
-│   │  diseasesCatalog[]  diseaseRequests[]  activityLog[]│     │
-│   └──────────────────────────────────────────────────┘       │
-└──────────────────────────────────────────────────────────────┘
-```
+The system is built around three concrete operational problems:
 
-### Mermaid Diagram
-
-```mermaid
-graph TD
-    Browser["Browser — React SPA :5173"]
-
-    subgraph Frontend
-        AuthCtx["AuthContext\n(JWT in localStorage)"]
-        ApiClient["apiClient.js\n(fetch + Bearer token)"]
-        Router["React Router v6\n(lazy-loaded pages)"]
-    end
-
-    subgraph Backend ["Express 5 API — :5000"]
-        GlobalGate["Global JWT Middleware\n(app.js)"]
-        AuthRoute["/api/auth"]
-        DoctorRoute["/api/doctors"]
-        PatientRoute["/api/patients"]
-        DiseaseRoute["/api/diseases"]
-        CatalogRoute["/api/disease-catalog"]
-        RequestRoute["/api/disease-requests"]
-        DashRoute["/api/dashboard"]
-        DB["In-Memory DB\n(db.js)"]
-    end
-
-    Browser --> AuthCtx
-    Browser --> Router
-    AuthCtx --> ApiClient
-    ApiClient -->|"/api/* proxied"| GlobalGate
-    GlobalGate --> AuthRoute
-    GlobalGate --> DoctorRoute
-    GlobalGate --> PatientRoute
-    GlobalGate --> DiseaseRoute
-    GlobalGate --> CatalogRoute
-    GlobalGate --> RequestRoute
-    GlobalGate --> DashRoute
-    DoctorRoute --> DB
-    PatientRoute --> DB
-    DiseaseRoute --> DB
-    CatalogRoute --> DB
-    RequestRoute --> DB
-    DashRoute --> DB
-```
-
-### In-Memory Data Store — Design Decision
-
-The backend uses a plain JavaScript object (`db/db.js`) as its data store rather than a SQL or NoSQL database. This is a **deliberate architectural choice** for the current prototype phase:
-
-| Concern | Decision |
+| Problem | How MRMS addresses it |
 |---|---|
-| **Setup friction** | Zero — no database engine, no connection strings, no migrations required |
-| **Stakeholder demos** | Any CareTrack Clinic evaluator can clone and run the system in under two minutes |
-| **Seeded data** | User accounts and bcrypt-hashed passwords are pre-populated at boot time via `bcrypt.hashSync` |
-| **Future path** | The controller layer is the only code that touches `db` — swapping to MongoDB or PostgreSQL requires only controller changes, leaving routes, middleware, and the frontend completely untouched |
+| **Staff see data they shouldn't, or can't see data they need** | Role-based permissions are enforced on both the API (`allowRoles` middleware) and the UI (`can()` permission checks), so a receptionist can register patients but never sees diagnosis details, while a doctor only sees their own patient list. |
+| **Unvetted medical terminology pollutes patient records** | New diagnoses that aren't in the clinic's disease catalog go through a request → admin-approval workflow before they become reusable catalog entries, keeping the catalog clinically accurate. |
+| **No live operational picture for managers** | The dashboard aggregates patient counts, critical cases, active/resolved diagnoses, and a recent activity feed in real time, scoped automatically to the logged-in user's role. |
 
-> **Trade-off acknowledged:** Data does not survive process restarts. This is acceptable for a zero-infrastructure clinical prototype; a production build would replace `db.js` with a persistent store without any interface changes.
-
-### ES Module Backend
-
-The backend declares `"type": "module"` in `package.json`, enabling native ES Module syntax (`import`/`export`) across every file. This aligns the backend with the frontend's module standard and avoids the cognitive overhead of mixing CommonJS `require()` with ESM.
+The product is intentionally scoped as a working prototype for evaluation and demonstration rather than a production deployment — see [Section 3](#3-data-model) for the trade-off this implies.
 
 ---
 
-## 2. Why React + Vite? — The Critical Performance Shift
+## 2. System Architecture
 
-The first iteration of MRMS was built in **Vanilla JavaScript**, relying on direct DOM manipulation (`innerHTML`, `appendChild`, `querySelector`) to render patient lists, doctor cards, and diagnosis tables.
+MRMS is a fully decoupled system: a stateless Express REST API and a React single-page application that talks to it exclusively over HTTP. Either side can be rebuilt or redeployed independently.
 
-### The Problem — Vanilla JS at Scale
+```
+┌─────────────────────────────────────────────────────────────┐
+│                         BROWSER                             │
+│   React 18 SPA (Vite dev server — port 5173)                │
+│   AuthContext (JWT) · apiClient (fetch + Bearer) · Router   │
+└───────────────────────────┬───────────────────────────────-──┘
+                             │  /api/*  (proxied by Vite to :5000)
+                             ▼
+┌─────────────────────────────────────────────────────────────┐
+│              Express 5 REST API — port 5000                 │
+│   app.js → global JWT gate → route modules → controllers    │
+│   Resources: auth · doctors · patients · diseases ·         │
+│              disease-catalog · disease-requests · dashboard │
+└───────────────────────────┬───────────────────────────────-──┘
+                             ▼
+                    In-memory data store (db.js)
+        users[] doctors[] patients[] diseases[] diseasesCatalog[]
+                  diseaseRequests[] activityLog[]
+```
 
-During prototype testing with CareTrack Clinic's simulated dataset (hundreds of mock patients and associated histories), two critical failures emerged:
+### Why an in-memory store
 
-1. **UI thread blocking:** Every filter keystroke or data refresh triggered a full re-render of the list — clearing the DOM and rebuilding it from scratch. With large lists, this saturated the browser's main thread, causing noticeable lag between input and visual feedback.
-2. **Browser freezing:** Simultaneous renders of multiple data panels (patient table, activity log, stat cards) compounded the blocking, occasionally hanging the browser tab entirely on lower-spec clinic machines.
+The backend uses a plain JavaScript object (`backend/db/db.js`) instead of a SQL/NoSQL database. This is deliberate for the current prototype stage:
 
-### The Solution — React's Virtual DOM
+- **Zero setup friction** — no database engine, connection string, or migration step; the API runs immediately after `npm install`.
+- **Seeded on boot** — demo user accounts are created with `bcrypt.hashSync` at process start.
+- **Isolated blast radius** — only the controller layer touches `db`, so swapping in MongoDB/PostgreSQL later only requires controller changes; routes, middleware, and the frontend are untouched.
+- **Trade-off** — data does not survive a process restart. Acceptable for a clinical demo/prototype, not for production use.
 
-React resolves both problems through its **reconciliation engine**:
+### ES Modules
 
-- **Virtual DOM diffing:** React maintains an in-memory representation of the UI. On each state change it computes the minimum set of real DOM operations required and batches them into a single efficient paint cycle.
-- **Partial updates:** Only the specific list items that changed are touched. A filter that hides 80% of a patient list does not destroy and recreate the remaining 20% — it simply removes nodes that no longer match.
-- **60 fps scrolling:** Because DOM writes are batched and minimal, the browser's compositor thread is never starved, keeping scroll and interaction performance smooth even on the clinic's older hardware.
-- **Reduced RAM overhead:** Unused component subtrees are unmounted and garbage-collected; the Virtual DOM's diff cost is far lower than repeated full-DOM rebuilds.
-
-### Vite's Role — Esbuild-Powered Tooling
-
-| Capability | Vite + Esbuild | Traditional Webpack |
-|---|---|---|
-| **Cold start** | < 300 ms (native ESM, no bundle on dev) | 10–30 s (full bundle required) |
-| **HMR (Hot Module Replacement)** | Module-level, sub-50 ms updates | Full re-bundle on change |
-| **Production build** | Rollup-optimised, code-split chunks | Configurable but verbose |
-| **Config complexity** | 15-line `vite.config.js` | Hundreds of lines typical |
-
-Vite's dev-server proxy (configured in `vite.config.js`) transparently forwards every `/api/*` request to `http://localhost:5000`, eliminating CORS friction during development without any extra configuration on the backend.
-
-**Result:** The React + Vite rewrite eliminated all observed UI freezes, reduced perceived load time to under 200 ms per page navigation (via React `lazy()` + `Suspense`), and cut average feature iteration time significantly compared to the Vanilla JS baseline.
+The backend declares `"type": "module"` so all backend code uses native `import`/`export`, matching the frontend's module style.
 
 ---
 
-## 3. Role-Based Access Control (RBAC) & Authentication
+## 3. Data Model
 
-### 3.1 Clinical Roles
+All records are plain JS objects with a `randomUUID()` id, stored in the arrays below (`backend/db/db.js`).
 
-MRMS defines four pre-built roles that map to real CareTrack Clinic staff categories:
-
-| Backend Role Token | Frontend Display Name | Typical Staff |
+| Collection | Key fields | Notes |
 |---|---|---|
-| `administrator` | `Admin` | IT/clinic manager |
-| `clinician` | `Clinician` | Nurse / clinical lead |
-| `receptionist` | `Receptionist` | Front-desk staff |
-| `doctor` | `Doctor` | Consulting physician |
+| `users` | `id, username, password (bcrypt hash), role, doctorId` | Seeded with one `admin`, one `clinician`, one `receptionist` account. `doctor` accounts are created when a doctor record is given a username/password. |
+| `doctors` | `id, name, specialization, email, phone, department, status, joinDate, patients, username, createdBy/At, updatedBy/At` | `username` links the doctor record to a `users` entry with role `doctor`. |
+| `patients` | `id, name, dob, gender, blood, email, phone, address, condition, assignedDoctor, doctorId, status, admitDate, createdBy/At, updatedBy/At` | `doctorId` scopes visibility for the `doctor` role. |
+| `diseases` | `id, patient, patientId, doctor, code, name, category, severity, date, notes, status, diseaseRequestPending, createdBy/At, updatedBy/At` | A patient's diagnosis record. |
+| `diseasesCatalog` | `id, name, icdCode, category, description, createdBy/At, updatedBy/At` | The clinic's master list of recognised conditions. |
+| `diseaseRequests` | `id, requestedDiseaseName, requestedByDoctor, doctorName, diagnosisId, suggestedIcdCode, suggestedCategory, status (pending/approved/rejected), adminResponse, createdAt, updatedAt` | Governs how new conditions enter `diseasesCatalog`. |
+| `activityLog` | `id, icon, color, text, detail, performedBy, timestamp` | Capped at 100 entries; feeds the dashboard's "recent activity" panel. |
 
-The mapping is maintained in `frontend-react/src/utils/permissions.js` (`ROLE_MAP`) so the backend's lowercase tokens are translated to display names exactly once — at login — and the rest of the frontend uses the display names consistently.
+---
 
-### 3.2 Authentication Flow
+## 4. Roles & Access Control
 
-```
-Client                          Express API
-  │                                 │
-  │  POST /api/auth/login           │
-  │  { username, password }  ──────►│
-  │                                 │  1. Find user in db.users[]
-  │                                 │  2. bcrypt.compare(password, hash)
-  │                                 │  3. jwt.sign(payload, JWT_SECRET, { expiresIn: '8h' })
-  │                                 │  4. Log activity to activityLog[]
-  │◄── { token, role, username } ───│
-  │                                 │
-  │  localStorage.setItem('token')  │
-  │  localStorage.setItem('userRole')│
-  │                                 │
-  │  GET /api/patients              │
-  │  Authorization: Bearer <token> ►│
-  │                                 │  5. Global middleware: jwt.verify(token, JWT_SECRET)
-  │                                 │  6. req.user = { id, username, role, doctorId }
-  │                                 │  7. allowRoles(...) checks req.user.role
-  │◄── 200 { data: [...] } ─────────│
-```
+Four roles map to real clinic staff categories:
 
-**Key implementation details:**
+| Backend role token | Frontend display name | Typical staff |
+|---|---|---|
+| `administrator` | Admin | IT / clinic manager |
+| `clinician` | Clinician | Nurse / clinical lead |
+| `receptionist` | Receptionist | Front-desk staff |
+| `doctor` | Doctor | Consulting physician |
 
-- **Password hashing:** `bcryptjs` with 10 salt rounds. Passwords are hashed at startup (`bcrypt.hashSync`) and compared at login (`bcrypt.compare`) — the plaintext password never exists beyond the incoming request body.
-- **Token expiry — 8 hours:** Matches a standard clinic work shift. A nurse logging in at 08:00 will have their session automatically invalidated at 16:00, eliminating the need for manual logout at shift end.
-- **Stateless JWT:** The server holds no session state. Every request is self-authenticated by the token's signature. This allows the API to scale horizontally without a shared session store.
-- **Global JWT gate (`app.js`):** A single middleware runs before every `/api/*` route. `POST /api/auth/login` is the only exception — it short-circuits before the JWT check. Any missing or invalid token returns `401` immediately, before the request reaches any controller.
-
-### 3.3 Frontend Token Management — `AuthContext.jsx`
-
-```
-Login response received
-       │
-       ▼
-ROLE_MAP[data.role] → display name
-       │
-       ▼
-localStorage.setItem('token', ...)
-localStorage.setItem('userRole', ...)
-localStorage.setItem('username', ...)
-localStorage.setItem('doctorId', ...) ← doctor-linked accounts only
-       │
-       ▼
-AuthContext state updated → React re-renders all consumers
-       │
-       ▼
-apiClient.js — every request:
-  headers['Authorization'] = `Bearer ${token}`
-```
-
-On page reload, `readStoredUser()` rehydrates the auth state from `localStorage`, so the user remains logged in across browser refreshes for the duration of the 8-hour token window.
-
-When a `401` is received from the API, `onUnauthorized()` is called, which triggers `AuthContext.logout()` → clears `localStorage` → redirects to `/login`.
-
-### 3.4 Route-Level RBAC — `allowRoles`
-
-Each route file defines its own `allowRoles(...roles)` guard as a middleware factory:
+Every protected route declares an `allowRoles(...roles)` middleware inline in its route file (`backend/routes/*.js`):
 
 ```js
 const allowRoles = (...roles) => (req, res, next) => {
+  if (!req.user) return res.status(401).json({ success: false, message: 'Unauthorized. Please log in.' });
   if (!roles.includes(req.user.role))
-    return res.status(403).json({ success: false, message: `Access denied.` });
+    return res.status(403).json({ success: false, message: `Access denied. Required roles: ${roles.join(', ')}.` });
   next();
 };
 ```
 
-This pattern keeps permission logic co-located with the route declaration and produces a clear 403 response with no ambiguity about which role is required.
+The same matrix is mirrored on the frontend in `frontend-react/src/utils/permissions.js`, where a `can(module, action, role)` helper hides Create/Edit/Delete controls the user isn't allowed to use. This is defence-in-depth: the UI hides actions for clarity, but the API is the actual enforcement point.
 
-### 3.5 Frontend Permission Matrix
+### Doctor-scoped data
 
-```
-permissions.js — Permissions object
-                         create  edit  delete  view
-doctors:
-  Admin                    ✓      ✓      ✓      ✓
-  Clinician                ✗      ✗      ✗      ✓
-  Receptionist             ✗      ✗      ✗      ✓
-  Doctor                   ✗      ✗      ✗      ✓
-
-patients:
-  Admin                    ✓      ✓      ✓      ✓
-  Clinician                ✗      ✓      ✗      ✓
-  Receptionist             ✓      ✗      ✗      ✓
-  Doctor                   ✗      ✓      ✗      ✓
-
-diagnoses:
-  Admin                    ✓      ✓      ✓      ✓
-  Clinician                ✗      ✗      ✗      ✓
-  Receptionist             ✗      ✗      ✗      ✗  ← blocked
-  Doctor                   ✗      ✗      ✗      ✓
-
-diseases (catalog):
-  Admin                    ✓      ✓      ✓      ✓
-  Clinician                ✗      ✗      ✗      ✓
-  Receptionist             ✗      ✗      ✗      ✗  ← blocked
-  Doctor                   ✗      ✗      ✗      ✓
-```
-
-The `can(module, action, role)` helper is called throughout page components to conditionally render action buttons — a Receptionist visiting the Doctors page sees the list but no Add/Edit/Delete controls.
+A logged-in `doctor` only ever sees their own patients and the diagnoses tied to those patients — this is enforced server-side in `patientController.js` and `diseaseController.js` (filtering by `req.user.doctorId`), not just hidden in the UI.
 
 ---
 
-## 4. Special Functional Workflows
-
-### 4.1 CRUD + Live Filtering — Doctors, Patients, Diagnoses
-
-All three main data modules share the same interaction pattern:
-
-1. **Load** — Page mounts → `useApi` fires `GET /api/<resource>` → data stored in local state.
-2. **Live filter** — A search `<input>` filters the rendered array client-side on every keystroke using `Array.filter()`. No additional API call is made; React re-renders only the changed list items via the Virtual DOM.
-3. **Create** — "Add" button opens a `Modal` component → form submission → `POST /api/<resource>` → on success the new record is appended to local state and a toast notification is shown.
-4. **Update** — Row "Edit" button → Modal pre-filled with existing data → `PUT /api/<resource>/:id` → local state updated in place.
-5. **Delete** — Row "Delete" button → `ConfirmDeleteModal` shown → on confirm → `DELETE /api/<resource>/:id` → record removed from local state.
-
-All actions that mutate data are gated by `can(module, action, user.role)` before the corresponding UI control is rendered, providing defence-in-depth alongside the backend `allowRoles` check.
-
-### 4.2 Disease Catalog Workflow
-
-The Disease Catalog implements a two-actor governance process to ensure clinical accuracy of conditions recorded in the system.
+## 5. Authentication
 
 ```
-CLINICIAN / DOCTOR                     ADMINISTRATOR
-      │                                      │
-      │  1. Encounters a condition            │
-      │     not in the catalog                │
-      │                                      │
-      │  POST /api/disease-requests           │
-      │  { name, description, ... }  ────────►│
-      │                                      │  2. Request saved with
-      │                                      │     status: 'pending'
-      │                                      │
-      │                          GET /api/disease-requests
-      │                          (Admin-only endpoint)
-      │                                      │
-      │                                      │  3. Admin reviews panel
-      │                                      │     Approve or Reject
-      │                                      │
-      │                      PUT /api/disease-requests/:id/approve
-      │                                      │  4a. On Approve:
-      │                                      │      → entry added to
-      │                                      │        db.diseasesCatalog[]
-      │                                      │
-      │                      PUT /api/disease-requests/:id/reject
-      │                                      │  4b. On Reject:
-      │                                      │      → request marked rejected
-      │                                      │        with optional reason
+Client                                Express API
+  │  POST /api/auth/login                │
+  │  { username, password } ────────────►│
+  │                                       │ 1. find user by username
+  │                                       │ 2. bcrypt.compare(password, hash)
+  │                                       │ 3. jwt.sign({ id, username, role, doctorId }, secret, 8h)
+  │                                       │ 4. log activity
+  │◄── { token, role, username, doctorId }│
+  │                                       │
+  │  GET /api/patients                    │
+  │  Authorization: Bearer <token> ──────►│
+  │                                       │ 5. global middleware verifies JWT
+  │                                       │ 6. req.user = decoded payload
+  │                                       │ 7. allowRoles(...) checks req.user.role
+  │◄── 200 { success, message, data } ────│
 ```
 
-**Why this flow matters for CareTrack Clinic:**  
-It prevents unvalidated or misspelled medical conditions from entering the master catalog. Only a system Administrator can promote a request into the official catalog, while Clinicians and Doctors retain the ability to flag gaps without waiting for a manual IT ticket.
+- **Password hashing** — `bcryptjs`, 10 salt rounds. Plaintext passwords never persist beyond the request body.
+- **Token expiry — 8 hours**, matching a clinic shift; no manual logout required at shift end.
+- **Stateless JWT** — the server holds no session state, so the API can scale horizontally.
+- **Global gate (`app.js`)** — one middleware runs before every `/api/*` route. `POST /api/auth/login` is the only path that bypasses it. A missing/invalid `Authorization: Bearer <token>` header returns `401` before any controller runs.
+
+On the frontend, `AuthContext.jsx` stores `token`, `userRole`, `username`, and (for doctor accounts) `doctorId` in `localStorage`, rehydrates on page reload, and clears state + redirects to `/login` whenever the API returns `401`.
 
 ---
 
-## 5. Folder Structure
+## 6. API Endpoint Reference
+
+All endpoints return `{ success: boolean, message: string, data: ... }`. Except for `POST /api/auth/login`, every endpoint requires `Authorization: Bearer <token>`. Missing/invalid tokens return **401**; a valid token with an insufficient role returns **403**.
+
+### Authentication — `/api/auth`
+
+| Method | Endpoint | Roles | Request body | Response `data` |
+|---|---|---|---|---|
+| POST | `/login` | Public | `{ username, password }` | `{ token, role, username, doctorId }` |
+| POST | `/logout` | All | — | `null` (stateless — client discards the token) |
+
+### Dashboard — `/api/dashboard`
+
+| Method | Endpoint | Roles | Response `data` |
+|---|---|---|---|
+| GET | `/stats` | All | `{ totalDoctors, activeDoctors, totalPatients, criticalPatients, patientsByStatus, totalDiseases, activeDiseases, resolvedDiseases, severeDiseases, pendingDiseaseRequests, recentActivity[] }` |
+
+`pendingDiseaseRequests` is only populated for `administrator`; for a `doctor`, every count above is automatically scoped to that doctor's own patients/diagnoses/activity.
+
+### Doctors — `/api/doctors`
+
+| Method | Endpoint | Roles | Request body | Notes |
+|---|---|---|---|---|
+| GET | `/` | All | — | Optional `?search=` filters by name/specialization/department |
+| GET | `/:id` | All | — | 404 if not found |
+| POST | `/` | Admin | `{ name, specialization, email, department, phone?, status?, joinDate?, username?, password? }` | `name/specialization/email/department` required. Supplying `username` + `password` also creates a linked `users` row with role `doctor` |
+| PUT | `/:id` | Admin | Any subset of the create fields | Partial update — omitted fields keep their existing value |
+| DELETE | `/:id` | Admin | — | Also deletes the linked `doctor`-role user account, if any |
+
+### Patients — `/api/patients`
+
+| Method | Endpoint | Roles | Request body | Notes |
+|---|---|---|---|---|
+| GET | `/` | All | — | `doctor` role is auto-scoped to their own patients; optional `?search=`, `?doctorId=` |
+| GET | `/:id` | All | — | Returns patient + nested `doctor` object + `diseases[]`. A `doctor` requesting another doctor's patient gets **403** |
+| POST | `/` | Admin, Clinician, Receptionist | `{ name, gender, dob?, blood?, email?, phone?, address?, condition?, doctorId?, status?, admitDate? }` | `name`/`gender` required |
+| PUT | `/:id` | Admin, Clinician, Doctor | Any subset of create fields | A `doctor` updating a patient outside their assignment gets **403** |
+| DELETE | `/:id` | Admin | — | |
+
+### Diagnoses (Disease Records) — `/api/diseases`
+
+| Method | Endpoint | Roles | Request body | Notes |
+|---|---|---|---|---|
+| GET | `/` | Admin, Clinician, Doctor | — | `doctor` auto-scoped to diagnoses of their own patients; optional `?search=`, `?severity=`, `?category=`, `?patientId=` |
+| GET | `/:id` | Admin, Clinician, Doctor | — | |
+| POST | `/` | Admin, Clinician, Doctor | `{ name, category, severity, patient?, patientId?, doctor?, code?, date?, notes?, status?, isNewDiseaseRequest?, requestedDiseaseName? }` | `name/category/severity` required. If `isNewDiseaseRequest` is `true` and `requestedDiseaseName` is given, a matching entry is also created in `diseaseRequests` (status `pending`) |
+| PUT | `/:id` | Admin, Clinician, Doctor | Any subset of create fields | |
+| DELETE | `/:id` | Admin | — | |
+
+### Disease Catalog (Master List) — `/api/disease-catalog`
+
+| Method | Endpoint | Roles | Request body | Notes |
+|---|---|---|---|---|
+| GET | `/` | Admin, Clinician, Doctor | — | Optional `?search=`, `?category=` |
+| GET | `/:id` | Admin, Clinician, Doctor | — | |
+| POST | `/` | Admin | `{ name, icdCode?, category?, description? }` | `name` required and must be unique (case-insensitive) |
+| PUT | `/:id` | Admin | Any subset of create fields | Rejects rename to a name already used by another entry |
+| DELETE | `/:id` | Admin | — | |
+
+### Disease Requests (Catalog Governance) — `/api/disease-requests`
+
+| Method | Endpoint | Roles | Request body | Notes |
+|---|---|---|---|---|
+| GET | `/` | Admin | — | Optional `?status=pending\|approved\|rejected`; sorted newest first |
+| POST | `/` | Admin, Clinician, Doctor | `{ requestedDiseaseName, diagnosisId?, doctorName? }` | Creates a `pending` request |
+| PUT | `/:id/approve` | Admin | `{ adminResponse?, addToCatalog? (default true), icdCode?, category?, description? }` | Marks request `approved`; unless `addToCatalog` is explicitly `false`, also inserts the disease into `diseasesCatalog` (skipped if a same-named entry already exists). Updates the linked diagnosis's `diseaseRequestStatus` |
+| PUT | `/:id/reject` | Admin | `{ adminResponse? }` | Marks request `rejected`; updates the linked diagnosis's `diseaseRequestStatus` |
+
+Both approve/reject return **400** if the request isn't currently `pending` (prevents double-processing).
+
+---
+
+## 7. Key Workflows
+
+### 7.1 Standard CRUD + live filtering (Doctors, Patients, Diagnoses)
+
+1. **Load** — page mounts → `useApi` calls `GET /api/<resource>` → result stored in local state.
+2. **Filter** — a search input filters the already-loaded array client-side on every keystroke; no extra API calls.
+3. **Create** — modal form → `POST /api/<resource>` → new record appended to local state, toast shown.
+4. **Update** — edit modal pre-filled → `PUT /api/<resource>/:id` → record replaced in place.
+5. **Delete** — confirm modal → `DELETE /api/<resource>/:id` → record removed from local state.
+
+Every mutating action is gated client-side by `can(module, action, role)` before the control is even rendered, in addition to the server-side `allowRoles` check.
+
+### 7.2 Disease catalog governance
+
+```
+CLINICIAN / DOCTOR                          ADMINISTRATOR
+  encounters an unlisted condition
+  POST /api/disease-requests  ────────────►  saved as status: 'pending'
+                                              GET /api/disease-requests (admin reviews)
+                                              PUT /api/disease-requests/:id/approve
+                                                → entry added to diseasesCatalog
+                                              PUT /api/disease-requests/:id/reject
+                                                → request marked rejected, optional reason
+```
+
+This prevents unvetted or misspelled conditions from entering the shared catalog: only an Administrator can promote a request into `diseasesCatalog`, while Clinicians and Doctors can flag a gap without needing a manual IT change.
+
+---
+
+## 8. Folder Structure
 
 ```
 mrms-dashboard/
-│
-├── backend/                        # Express 5 REST API
-│   ├── server.js                   # Entry point — binds to port 5000
-│   ├── app.js                      # Express app, CORS, global JWT gate, route mounting
-│   ├── .env                        # JWT_SECRET, PORT, FRONTEND_ORIGIN
-│   ├── db/
-│   │   └── db.js                   # In-memory data store (users, doctors, patients…)
-│   ├── controllers/
-│   │   ├── authController.js       # login / logout
-│   │   ├── dashboardController.js  # aggregated stats
-│   │   ├── doctorController.js     # Doctor CRUD
-│   │   ├── patientController.js    # Patient CRUD
-│   │   ├── diseaseController.js    # Diagnosis CRUD
-│   │   ├── diseaseCatalogController.js  # Catalog CRUD (Admin)
-│   │   └── diseaseRequestController.js # Request submit / approve / reject
-│   └── routes/
+├── backend/                          # Express 5 REST API
+│   ├── server.js                     # Entry point — binds to PORT (default 5000)
+│   ├── app.js                        # CORS, global JWT gate, route mounting
+│   ├── .env                          # JWT_SECRET, PORT, FRONTEND_ORIGIN
+│   ├── db/db.js                      # In-memory data store
+│   ├── controllers/                  # Business logic per resource
+│   │   ├── authController.js
+│   │   ├── dashboardController.js
+│   │   ├── doctorController.js
+│   │   ├── patientController.js
+│   │   ├── diseaseController.js
+│   │   ├── diseaseCatalogController.js
+│   │   └── diseaseRequestController.js
+│   └── routes/                       # Route + role-gate declarations
 │       ├── authRoutes.js
 │       ├── dashboardRoutes.js
 │       ├── doctorRoutes.js
@@ -363,197 +286,62 @@ mrms-dashboard/
 │       ├── diseaseCatalogRoutes.js
 │       └── diseaseRequestRoutes.js
 │
-└── frontend-react/                 # React 18 + Vite 5 SPA
-    ├── index.html                  # Vite HTML entry
-    ├── vite.config.js              # Vite config + /api proxy to :5000
-    ├── package.json
+└── frontend-react/                   # React 18 + Vite 5 SPA
+    ├── vite.config.js                 # Dev server + /api proxy to :5000
     └── src/
-        ├── main.jsx                # React root — mounts App inside BrowserRouter + AuthProvider
-        ├── App.jsx                 # Route definitions, ProtectedRoute, lazy imports
-        ├── contexts/
-        │   ├── AuthContext.jsx     # JWT state, login/logout, localStorage sync
-        │   └── ToastContext.jsx    # Global toast notification state
-        ├── hooks/
-        │   ├── useApi.js           # Generic data-fetching hook with AbortController
-        │   ├── usePermissions.js   # Returns can() results for the current user's role
-        │   └── useCountUp.js       # Animated number counter for dashboard stats
-        ├── services/
-        │   └── apiClient.js        # fetch wrapper — attaches Bearer token to all requests
-        ├── utils/
-        │   ├── permissions.js      # ROLE_MAP, Permissions matrix, can() helper
-        │   └── formatters.js       # Date / string formatting utilities
-        ├── components/
-        │   ├── layout/
-        │   │   ├── AppLayout.jsx   # Shell — Sidebar + Topbar + <Outlet>
-        │   │   ├── Sidebar.jsx     # Navigation links filtered by role
-        │   │   └── Topbar.jsx      # User avatar, role badge, logout button
-        │   └── common/
-        │       ├── Modal.jsx            # Reusable modal wrapper
-        │       ├── ConfirmDeleteModal.jsx
-        │       ├── AccessDenied.jsx
-        │       ├── EmptyState.jsx
-        │       ├── StatusBadge.jsx
-        │       ├── Avatar.jsx
-        │       └── ToastContainer.jsx
-        ├── pages/
-        │   ├── Login/
-        │   │   └── Login.jsx
-        │   ├── Dashboard/
-        │   │   ├── Dashboard.jsx
-        │   │   ├── StatCard.jsx
-        │   │   ├── PatientStatusPanel.jsx
-        │   │   └── RecentActivity.jsx
-        │   ├── Doctors/
-        │   │   ├── DoctorsPage.jsx
-        │   │   └── DoctorModal.jsx
-        │   ├── Patients/
-        │   │   ├── PatientsPage.jsx
-        │   │   └── PatientModal.jsx
-        │   ├── PatientProfile/
-        │   │   └── PatientProfile.jsx
-        │   ├── Diagnoses/
-        │   │   ├── DiagnosesPage.jsx
-        │   │   └── DiagnosisModal.jsx
-        │   ├── Diseases/
-        │   │   ├── DiseasesPage.jsx
-        │   │   ├── DiseaseModal.jsx
-        │   │   ├── ApproveModal.jsx
-        │   │   └── RejectModal.jsx
-        │   ├── ForbiddenPage.jsx   # 403 view (rendered inside AppLayout)
-        │   └── NotFoundPage.jsx    # 404 view (standalone)
-        └── styles/
-            └── index.css
+        ├── App.jsx                   # Routes, ProtectedRoute, lazy imports
+        ├── contexts/                  # AuthContext (JWT), ToastContext
+        ├── hooks/                     # useApi, usePermissions, useCountUp
+        ├── services/apiClient.js      # fetch wrapper, attaches Bearer token
+        ├── utils/                     # permissions.js (ROLE_MAP, can()), formatters.js
+        ├── components/                # layout/ (Sidebar, Topbar) + common/ (Modal, etc.)
+        └── pages/                     # Login, Dashboard, Doctors, Patients,
+                                        # PatientProfile, Diagnoses, Diseases, 403/404
 ```
 
 ---
 
-## 6. Tech Stack
+## 9. Tech Stack
 
 ### Frontend
 
 | Technology | Version | Purpose |
 |---|---|---|
-| React | 18.3 | UI component model, Virtual DOM, state management |
-| React DOM | 18.3 | React renderer for the browser |
-| React Router DOM | 6.24 | Client-side routing, `<Navigate>`, `<Outlet>` |
-| Vite | 5.3 | Dev server (HMR via Esbuild), production bundler |
-| `@vitejs/plugin-react` | 4.3 | Babel + Fast Refresh integration for Vite |
+| React | 18.3 | UI components, state, Virtual DOM |
+| React Router DOM | 6.24 | Client-side routing, protected routes |
+| Vite | 5.3 | Dev server (HMR), production bundler |
+| `@vitejs/plugin-react` | 4.3 | Fast Refresh integration |
 
 ### Backend
 
 | Technology | Version | Purpose |
 |---|---|---|
-| Node.js | 22+ | JavaScript runtime |
-| Express | 5.2 | HTTP framework, routing, middleware pipeline |
-| `jsonwebtoken` | 9.0 | JWT signing and verification (`expiresIn: '8h'`) |
-| `bcryptjs` | 3.0 | Password hashing (10 salt rounds) |
-| `cors` | 2.8 | Cross-Origin Resource Sharing headers |
-| `dotenv` | 17.x | `.env` file loader for `JWT_SECRET`, `PORT` |
-
-### DevTools
-
-| Tool | Purpose |
-|---|---|
-| Nodemon | Auto-restarts the backend on file changes during development |
-| Vite HMR | Instant React component updates without full page reload |
-| Node.js `crypto` | `randomUUID()` used for ID generation (no third-party dependency) |
+| Node.js | 22+ | Runtime |
+| Express | 5.2 | HTTP framework, routing, middleware |
+| `jsonwebtoken` | 9.0 | JWT sign/verify, 8h expiry |
+| `bcryptjs` | 3.0 | Password hashing, 10 salt rounds |
+| `cors` | 2.8 | CORS headers for the frontend origin |
+| `dotenv` | 17.x | Loads `JWT_SECRET`, `PORT`, `FRONTEND_ORIGIN` |
+| Nodemon | 3.1 | Auto-restart backend on file changes (dev) |
 
 ---
 
-## 7. API Endpoint Reference
-
-All endpoints except `POST /api/auth/login` require a valid `Authorization: Bearer <token>` header. A missing or expired token returns **401**. A valid token with an insufficient role returns **403**.
-
-### Authentication
-
-| Method | Endpoint | Protected | Roles Allowed |
-|---|---|---|---|
-| `POST` | `/api/auth/login` | No | — (public) |
-| `POST` | `/api/auth/logout` | Yes | All |
-
-### Dashboard
-
-| Method | Endpoint | Protected | Roles Allowed |
-|---|---|---|---|
-| `GET` | `/api/dashboard/stats` | Yes | All |
-
-### Doctors
-
-| Method | Endpoint | Protected | Roles Allowed |
-|---|---|---|---|
-| `GET` | `/api/doctors` | Yes | All |
-| `GET` | `/api/doctors/:id` | Yes | All |
-| `POST` | `/api/doctors` | Yes | Admin |
-| `PUT` | `/api/doctors/:id` | Yes | Admin |
-| `DELETE` | `/api/doctors/:id` | Yes | Admin |
-
-### Patients
-
-| Method | Endpoint | Protected | Roles Allowed |
-|---|---|---|---|
-| `GET` | `/api/patients` | Yes | All |
-| `GET` | `/api/patients/:id` | Yes | All |
-| `POST` | `/api/patients` | Yes | Admin, Clinician, Receptionist |
-| `PUT` | `/api/patients/:id` | Yes | Admin, Clinician, Doctor |
-| `DELETE` | `/api/patients/:id` | Yes | Admin |
-
-### Diagnoses (Disease Records)
-
-| Method | Endpoint | Protected | Roles Allowed |
-|---|---|---|---|
-| `GET` | `/api/diseases` | Yes | Admin, Clinician, Doctor |
-| `GET` | `/api/diseases/:id` | Yes | Admin, Clinician, Doctor |
-| `POST` | `/api/diseases` | Yes | Admin, Clinician, Doctor |
-| `PUT` | `/api/diseases/:id` | Yes | Admin, Clinician, Doctor |
-| `DELETE` | `/api/diseases/:id` | Yes | Admin |
-
-### Disease Catalog (Master List)
-
-| Method | Endpoint | Protected | Roles Allowed |
-|---|---|---|---|
-| `GET` | `/api/disease-catalog` | Yes | Admin, Clinician, Doctor |
-| `GET` | `/api/disease-catalog/:id` | Yes | Admin, Clinician, Doctor |
-| `POST` | `/api/disease-catalog` | Yes | Admin |
-| `PUT` | `/api/disease-catalog/:id` | Yes | Admin |
-| `DELETE` | `/api/disease-catalog/:id` | Yes | Admin |
-
-### Disease Requests (Catalog Governance)
-
-| Method | Endpoint | Protected | Roles Allowed |
-|---|---|---|---|
-| `GET` | `/api/disease-requests` | Yes | Admin |
-| `POST` | `/api/disease-requests` | Yes | Admin, Clinician, Doctor |
-| `PUT` | `/api/disease-requests/:id/approve` | Yes | Admin |
-| `PUT` | `/api/disease-requests/:id/reject` | Yes | Admin |
-
----
-
-## 8. Installation & Setup Guide
+## 10. Installation & Setup
 
 ### Prerequisites
 
-- **Node.js** v22 or later (`node --version`)
-- **npm** v10 or later (`npm --version`)
-- Two terminal windows (one for backend, one for frontend)
+- Node.js v22+ (`node --version`)
+- npm v10+ (`npm --version`)
+- Two terminals (one per process)
 
----
-
-### Step 1 — Clone the Repository
-
-```bash
-git clone <repository-url>
-cd mrms-dashboard
-```
-
----
-
-### Step 2 — Configure the Backend
+### Backend
 
 ```bash
 cd backend
+npm install
 ```
 
-Create the `.env` file (one already exists — verify it contains the following):
+Verify `.env` contains:
 
 ```env
 PORT=5000
@@ -562,94 +350,42 @@ NODE_ENV=development
 FRONTEND_ORIGIN=http://localhost:5173
 ```
 
-> **Important:** Replace `JWT_SECRET` with a long, random string before any shared or production use. The secret signs every JWT — if it leaks, all tokens can be forged.
-
-Install backend dependencies:
-
-```bash
-npm install
-```
-
-Start the backend development server:
+> Replace `JWT_SECRET` with a long random string before any shared use — it signs every issued token.
 
 ```bash
 npm run dev
 ```
 
-Expected output:
-
-```
-  MRMS API running on http://localhost:5000
-  Environment : development
-  Frontend    : http://localhost:5173
-
-  Demo credentials:
-    admin        / admin123      (Administrator)
-    clinician    / clinic123     (Clinician)
-    receptionist / recept123     (Receptionist)
-```
-
----
-
-### Step 3 — Configure the Frontend
-
-Open a **new terminal** and navigate to the frontend directory:
+### Frontend
 
 ```bash
 cd frontend-react
-```
-
-Install frontend dependencies:
-
-```bash
 npm install
-```
-
-Start the Vite development server:
-
-```bash
 npm run dev
 ```
 
-Expected output:
+Open **http://localhost:5173**. Vite proxies all `/api/*` requests to `http://localhost:5000`, so no manual CORS configuration is needed in development.
 
-```
-  VITE v5.x.x  ready in ~300ms
-
-  ➜  Local:   http://localhost:5173/
-  ➜  Network: use --host to expose
-```
-
----
-
-### Step 4 — Open the Application
-
-Navigate to **[http://localhost:5173](http://localhost:5173)** in your browser.
-
-The Vite dev server proxies all `/api/*` requests to `http://localhost:5000` automatically — no manual CORS configuration is needed during development.
-
----
-
-### Production Build (Frontend)
+### Production build (frontend)
 
 ```bash
 cd frontend-react
 npm run build
 ```
 
-The optimised, code-split output is written to `frontend-react/dist/`. Serve it with any static file host or add an Express static middleware to the backend.
+Output goes to `frontend-react/dist/`; serve it with any static host or via Express static middleware.
 
 ---
 
-## 9. Demo Credentials
+## 11. Demo Credentials
 
-| Username | Password | Role | Key Permissions |
+| Username | Password | Role | Key permissions |
 |---|---|---|---|
 | `admin` | `admin123` | Administrator | Full CRUD on all resources, catalog governance, disease request approval |
-| `clinician` | `clinic123` | Clinician | View doctors; edit patients; view diagnoses/diseases; submit disease requests |
-| `receptionist` | `recept123` | Receptionist | View doctors/patients; register new patients; no access to diagnoses or diseases |
+| `clinician` | `clinic123` | Clinician | View doctors; edit patients; view/create diagnoses; submit disease requests |
+| `receptionist` | `recept123` | Receptionist | View doctors/patients; register new patients; no access to diagnoses or the catalog |
 
-> **Note:** A fourth role — `doctor` — exists in the permission system and can be assigned to user accounts linked to a doctor record. No pre-seeded doctor-role credential is included in the prototype; create a Doctor record via the Admin account first.
+A fourth role, `doctor`, exists in the permission system but has no pre-seeded account — create a doctor record (with a username/password) from the Admin account to generate one.
 
 ---
 
