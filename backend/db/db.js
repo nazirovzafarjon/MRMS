@@ -1,46 +1,37 @@
-import { randomUUID as uuidv4 } from 'crypto';
-import bcrypt from 'bcryptjs';
+import mongoose from 'mongoose';
 
-const SALT_ROUNDS = 10;
+mongoose.set('strictQuery', true);
 
+export const connectDB = async () => {
+  const uri = process.env.MONGODB_URI;
+  if (!uri) {
+    throw new Error('MONGODB_URI is not set. Add it to backend/.env before starting the server.');
+  }
 
-const userIds = {
-  admin:        uuidv4(),
-  clinician:    uuidv4(),
-  receptionist: uuidv4(),
+  mongoose.connection.on('error', (err) => {
+    console.error('[MongoDB] connection error:', err.message);
+  });
+
+  mongoose.connection.on('disconnected', () => {
+    console.warn('[MongoDB] disconnected.');
+  });
+
+  mongoose.connection.on('reconnected', () => {
+    console.log('[MongoDB] reconnected.');
+  });
+
+  await mongoose.connect(uri, {
+    maxPoolSize: 10,
+    serverSelectionTimeoutMS: 10000,
+    autoIndex: true,
+  });
+
+  console.log(`[MongoDB] connected: ${mongoose.connection.host}/${mongoose.connection.name}`);
 };
 
-const db = {
-
-
-  users: [
-    { id: userIds.admin,        username: 'admin',        password: bcrypt.hashSync('admin123',  SALT_ROUNDS), role: 'administrator', doctorId: null },
-    { id: userIds.clinician,    username: 'clinician',    password: bcrypt.hashSync('clinic123', SALT_ROUNDS), role: 'clinician',     doctorId: null },
-    { id: userIds.receptionist, username: 'receptionist', password: bcrypt.hashSync('recept123', SALT_ROUNDS), role: 'receptionist',  doctorId: null },
-  ],
-
-
-  doctors: [
-  ],
-
-
-  patients: [
-    
-  ],
-
-  diseases: [
-    
-  ],
-
-  diseasesCatalog: [
-    
-  ],
-
-  diseaseRequests: [],
-
-  activityLog: [
-    
-  ],
+export const disconnectDB = async () => {
+  await mongoose.disconnect();
+  console.log('[MongoDB] connection closed.');
 };
 
-export default db;
+export default mongoose;
