@@ -1,4 +1,9 @@
-import db from '../db/db.js';
+import Doctor         from '../models/Doctor.js';
+import Patient         from '../models/Patient.js';
+import Disease          from '../models/Disease.js';
+import DiseaseRequest   from '../models/DiseaseRequest.js';
+import ActivityLog      from '../models/ActivityLog.js';
+import { toApiList }    from '../utils/serialize.js';
 
 const success = (res, data = null, message = 'Success', statusCode = 200) =>
   res.status(statusCode).json({ success: true, message, data });
@@ -13,31 +18,36 @@ export const getStats = async (req, res) => {
     // Scope data to the requesting doctor, or expose all records for other roles
     const isDoctor = role === 'doctor' && doctorId;
 
-    const allPatients  = db.patients        ?? [];
-    const allDiseases  = db.diseases        ?? [];
-    const allDoctors   = db.doctors         ?? [];
-    const allRequests  = db.diseaseRequests ?? [];
-    const allActivity  = db.activityLog     ?? [];
+    const patientFilter = isDoctor ? { doctorId } : {};
 
-    const scopedPatients = isDoctor
-      ? allPatients.filter(p => p.doctorId === doctorId)
-      : allPatients;
+    const [allDoctors, scopedPatients] = await Promise.all([
+      Doctor.find().lean(),
+      Patient.find(patientFilter).lean(),
+    ]);
 
-    const scopedPatientIds = new Set(scopedPatients.map(p => p.id));
+    const scopedPatientIds = new Set(scopedPatients.map(p => p._id));
 
-    const scopedDiseases = isDoctor
-      ? allDiseases.filter(d => scopedPatientIds.has(d.patientId))
-      : allDiseases;
+    const diseaseFilter = isDoctor
+      ? { patientId: { $in: [...scopedPatientIds] } }
+      : {};
 
-    const scopedActivity = isDoctor
-      ? allActivity.filter(a => a.performedBy === req.user.username)
-      : allActivity;
+    const scopedDiseases = await Disease.find(diseaseFilter).lean();
+
+    const activityFilter = isDoctor ? { performedBy: req.user.username } : {};
+    const recentActivity = await ActivityLog.find(activityFilter)
+      .sort({ timestamp: -1 })
+      .limit(10)
+      .lean();
 
     // Count patients by status using a single pass
     const patientsByStatus = scopedPatients.reduce((acc, p) => {
       if (p.status) acc[p.status] = (acc[p.status] ?? 0) + 1;
       return acc;
     }, {});
+
+    const pendingDiseaseRequests = role === 'administrator'
+      ? await DiseaseRequest.countDocuments({ status: 'pending' })
+      : 0;
 
     const stats = {
       totalDoctors:     allDoctors.length,
@@ -52,11 +62,9 @@ export const getStats = async (req, res) => {
       resolvedDiseases: scopedDiseases.filter(d => d.status === 'resolved').length,
       severeDiseases:   scopedDiseases.filter(d => d.severity === 'severe').length,
 
-      pendingDiseaseRequests: role === 'administrator'
-        ? allRequests.filter(r => r.status === 'pending').length
-        : 0,
+      pendingDiseaseRequests,
 
-      recentActivity: scopedActivity.slice(0, 10),
+      recentActivity: toApiList(recentActivity),
     };
 
     return success(res, stats, 'Dashboard statistics retrieved successfully');

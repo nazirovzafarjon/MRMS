@@ -1,5 +1,6 @@
-import { randomUUID as uuidv4 } from 'crypto';
-import db from '../db/db.js';
+import DiseaseCatalog from '../models/DiseaseCatalog.js';
+import { addActivity } from '../utils/activity.js';
+import { toApi, toApiList, escapeRegExp } from '../utils/serialize.js';
 
 const success = (res, data = null, message = 'Success', statusCode = 200) =>
   res.status(statusCode).json({ success: true, message, data });
@@ -7,15 +8,14 @@ const success = (res, data = null, message = 'Success', statusCode = 200) =>
 const error = (res, message = 'An error occurred', statusCode = 500) =>
   res.status(statusCode).json({ success: false, message });
 
-const addActivity = ({ icon, color, text, detail, performedBy = 'system' }) => {
-  db.activityLog.unshift({ id: uuidv4(), icon, color, text, detail, performedBy, timestamp: new Date().toISOString() });
-  if (db.activityLog.length > 100) db.activityLog.length = 100;
-};
-
 export const getDiseaseList = async (req, res) => {
   try {
     const { search, category } = req.query;
-    let result = [...db.diseasesCatalog];
+
+    const filter = {};
+    if (category) filter.category = category;
+
+    let result = await DiseaseCatalog.find(filter).lean();
 
     if (search) {
       const q = search.toLowerCase().trim();
@@ -26,11 +26,7 @@ export const getDiseaseList = async (req, res) => {
       );
     }
 
-    if (category) {
-      result = result.filter(d => d.category === category);
-    }
-
-    return success(res, result, 'Disease catalog retrieved successfully');
+    return success(res, toApiList(result), 'Disease catalog retrieved successfully');
   } catch (err) {
     return error(res, 'Failed to retrieve disease catalog.', 500);
   }
@@ -38,10 +34,10 @@ export const getDiseaseList = async (req, res) => {
 
 export const getDiseaseFromCatalog = async (req, res) => {
   try {
-    const disease = db.diseasesCatalog.find(d => d.id === req.params.id);
+    const disease = await DiseaseCatalog.findById(req.params.id).lean();
     if (!disease) return error(res, 'Disease not found in catalog.', 404);
 
-    return success(res, disease, 'Disease retrieved successfully');
+    return success(res, toApi(disease), 'Disease retrieved successfully');
   } catch (err) {
     return error(res, 'Failed to retrieve disease.', 500);
   }
@@ -55,14 +51,14 @@ export const addDiseaseToCatalog = async (req, res) => {
       return error(res, 'Disease name is required.', 400);
     }
 
-    const normalizedName = name.trim().toLowerCase();
-    const nameExists = db.diseasesCatalog.some(d => d.name.toLowerCase() === normalizedName);
+    const nameExists = await DiseaseCatalog.exists({
+      name: new RegExp(`^${escapeRegExp(name.trim())}$`, 'i'),
+    });
     if (nameExists) {
       return error(res, `A disease named "${name.trim()}" already exists in the catalog.`, 400);
     }
 
-    const newDisease = {
-      id:          uuidv4(),
+    const newDisease = await DiseaseCatalog.create({
       name:        name.trim(),
       icdCode:     (icdCode || '').trim(),
       category:    (category || 'Other').trim(),
@@ -71,11 +67,9 @@ export const addDiseaseToCatalog = async (req, res) => {
       createdAt:   new Date().toISOString(),
       updatedBy:   null,
       updatedAt:   null,
-    };
+    });
 
-    db.diseasesCatalog.push(newDisease);
-
-    addActivity({
+    await addActivity({
       icon:        'fa-virus',
       color:       '#6741d9',
       text:        `Disease "${newDisease.name}" added to catalog`,
@@ -83,7 +77,7 @@ export const addDiseaseToCatalog = async (req, res) => {
       performedBy: req.user.username,
     });
 
-    return success(res, newDisease, 'Disease added to catalog successfully', 201);
+    return success(res, toApi(newDisease.toObject()), 'Disease added to catalog successfully', 201);
   } catch (err) {
     return error(res, 'Failed to add disease to catalog.', 500);
   }
@@ -91,40 +85,43 @@ export const addDiseaseToCatalog = async (req, res) => {
 
 export const updateDiseaseInCatalog = async (req, res) => {
   try {
-    const idx = db.diseasesCatalog.findIndex(d => d.id === req.params.id);
-    if (idx === -1) return error(res, 'Disease not found in catalog.', 404);
+    const existing = await DiseaseCatalog.findById(req.params.id).lean();
+    if (!existing) return error(res, 'Disease not found in catalog.', 404);
 
     const { name, icdCode, category, description } = req.body;
-    const existing = db.diseasesCatalog[idx];
 
     if (name?.trim() && name.trim().toLowerCase() !== existing.name.toLowerCase()) {
-      const nameExists = db.diseasesCatalog.some(
-        d => d.name.toLowerCase() === name.trim().toLowerCase() && d.id !== existing.id
-      );
+      const nameExists = await DiseaseCatalog.exists({
+        _id:  { $ne: existing._id },
+        name: new RegExp(`^${escapeRegExp(name.trim())}$`, 'i'),
+      });
       if (nameExists) {
         return error(res, `A disease named "${name.trim()}" already exists in the catalog.`, 400);
       }
     }
 
-    db.diseasesCatalog[idx] = {
-      ...existing,
-      name:        name?.trim()        || existing.name,
-      icdCode:     icdCode?.trim()     ?? existing.icdCode,
-      category:    category?.trim()    || existing.category,
-      description: description?.trim() ?? existing.description,
-      updatedBy:   req.user.username,
-      updatedAt:   new Date().toISOString(),
-    };
+    const updated = await DiseaseCatalog.findByIdAndUpdate(
+      req.params.id,
+      {
+        name:        name?.trim()        || existing.name,
+        icdCode:     icdCode?.trim()     ?? existing.icdCode,
+        category:    category?.trim()    || existing.category,
+        description: description?.trim() ?? existing.description,
+        updatedBy:   req.user.username,
+        updatedAt:   new Date().toISOString(),
+      },
+      { returnDocument: 'after' }
+    ).lean();
 
-    addActivity({
+    await addActivity({
       icon:        'fa-virus-slash',
       color:       '#F6C343',
-      text:        `Disease "${db.diseasesCatalog[idx].name}" updated in catalog`,
-      detail:      `ICD: ${db.diseasesCatalog[idx].icdCode || '—'}`,
+      text:        `Disease "${updated.name}" updated in catalog`,
+      detail:      `ICD: ${updated.icdCode || '—'}`,
       performedBy: req.user.username,
     });
 
-    return success(res, db.diseasesCatalog[idx], 'Disease updated successfully');
+    return success(res, toApi(updated), 'Disease updated successfully');
   } catch (err) {
     return error(res, 'Failed to update disease.', 500);
   }
@@ -132,12 +129,10 @@ export const updateDiseaseInCatalog = async (req, res) => {
 
 export const deleteDiseaseFromCatalog = async (req, res) => {
   try {
-    const idx = db.diseasesCatalog.findIndex(d => d.id === req.params.id);
-    if (idx === -1) return error(res, 'Disease not found in catalog.', 404);
+    const removed = await DiseaseCatalog.findByIdAndDelete(req.params.id).lean();
+    if (!removed) return error(res, 'Disease not found in catalog.', 404);
 
-    const [removed] = db.diseasesCatalog.splice(idx, 1);
-
-    addActivity({
+    await addActivity({
       icon:        'fa-circle-minus',
       color:       '#E63757',
       text:        `Disease "${removed.name}" removed from catalog`,

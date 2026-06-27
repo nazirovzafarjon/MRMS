@@ -1,5 +1,8 @@
-import { randomUUID as uuidv4 } from 'crypto';
-import db from '../db/db.js';
+import Disease        from '../models/Disease.js';
+import Patient         from '../models/Patient.js';
+import DiseaseRequest  from '../models/DiseaseRequest.js';
+import { addActivity } from '../utils/activity.js';
+import { toApi, toApiList } from '../utils/serialize.js';
 
 const success = (res, data = null, message = 'Success', statusCode = 200) =>
   res.status(statusCode).json({ success: true, message, data });
@@ -7,22 +10,22 @@ const success = (res, data = null, message = 'Success', statusCode = 200) =>
 const error = (res, message = 'An error occurred', statusCode = 500) =>
   res.status(statusCode).json({ success: false, message });
 
-const addActivity = ({ icon, color, text, detail, performedBy = 'system' }) => {
-  db.activityLog.unshift({ id: uuidv4(), icon, color, text, detail, performedBy, timestamp: new Date().toISOString() });
-  if (db.activityLog.length > 100) db.activityLog.length = 100;
-};
-
 export const getAllDiseases = async (req, res) => {
   try {
     const { search, severity, patientId, category } = req.query;
-    let result = [...db.diseases];
+
+    const filter = {};
 
     if (req.user.role === 'doctor' && req.user.doctorId) {
-      const myPatientIds = db.patients
-        .filter(p => p.doctorId === req.user.doctorId)
-        .map(p => p.id);
-      result = result.filter(d => myPatientIds.includes(d.patientId));
+      const myPatients = await Patient.find({ doctorId: req.user.doctorId }).select('_id').lean();
+      filter.patientId = { $in: myPatients.map(p => p._id) };
     }
+
+    if (severity)  filter.severity  = severity;
+    if (category)  filter.category = category;
+    if (patientId) filter.patientId = patientId;
+
+    let result = await Disease.find(filter).lean();
 
     if (search) {
       const q = search.toLowerCase().trim();
@@ -33,11 +36,7 @@ export const getAllDiseases = async (req, res) => {
       );
     }
 
-    if (severity)  result = result.filter(d => d.severity === severity);
-    if (category)  result = result.filter(d => d.category === category);
-    if (patientId) result = result.filter(d => d.patientId === patientId);
-
-    return success(res, result, 'Diagnoses retrieved successfully');
+    return success(res, toApiList(result), 'Diagnoses retrieved successfully');
   } catch (err) {
     return error(res, 'Failed to retrieve diagnoses.', 500);
   }
@@ -45,10 +44,10 @@ export const getAllDiseases = async (req, res) => {
 
 export const getDiseaseById = async (req, res) => {
   try {
-    const disease = db.diseases.find(d => d.id === req.params.id);
+    const disease = await Disease.findById(req.params.id).lean();
     if (!disease) return error(res, 'Diagnosis record not found.', 404);
 
-    return success(res, disease, 'Diagnosis retrieved successfully');
+    return success(res, toApi(disease), 'Diagnosis retrieved successfully');
   } catch (err) {
     return error(res, 'Failed to retrieve diagnosis.', 500);
   }
@@ -66,10 +65,7 @@ export const createDisease = async (req, res) => {
       return error(res, 'Diagnosis name, category, and severity are required.', 400);
     }
 
-    const newDiagnosisId = uuidv4();
-
-    const newDiagnosis = {
-      id:        newDiagnosisId,
+    const newDiagnosis = await Disease.create({
       patient:   (patient || '').trim(),
       patientId: patientId || null,
       doctor:    (doctor || '').trim(),
@@ -84,17 +80,14 @@ export const createDisease = async (req, res) => {
       createdAt: new Date().toISOString(),
       updatedBy: null,
       updatedAt: null,
-    };
-
-    db.diseases.push(newDiagnosis);
+    });
 
     if (isNewDiseaseRequest && requestedDiseaseName?.trim()) {
-      db.diseaseRequests.push({
-        id:                    uuidv4(),
+      await DiseaseRequest.create({
         requestedDiseaseName:  requestedDiseaseName.trim(),
         requestedByDoctor:     req.user.username,
         doctorName:            doctor || req.user.username,
-        diagnosisId:           newDiagnosisId,
+        diagnosisId:           newDiagnosis._id,
         suggestedIcdCode:      (code || '').trim(),
         suggestedCategory:     category.trim(),
         status:                'pending',
@@ -104,11 +97,12 @@ export const createDisease = async (req, res) => {
       });
 
       newDiagnosis.diseaseRequestPending = true;
+      await newDiagnosis.save();
     }
 
     const severityColor = { severe: '#E63757', moderate: '#F6C343', mild: '#2C7BE5' };
 
-    addActivity({
+    await addActivity({
       icon:        'fa-file-medical',
       color:       severityColor[severity] || '#2C7BE5',
       text:        `Diagnosis "${newDiagnosis.name}" added`,
@@ -116,7 +110,7 @@ export const createDisease = async (req, res) => {
       performedBy: req.user.username,
     });
 
-    return success(res, newDiagnosis, 'Diagnosis created successfully', 201);
+    return success(res, toApi(newDiagnosis.toObject()), 'Diagnosis created successfully', 201);
   } catch (err) {
     return error(res, 'Failed to create diagnosis.', 500);
   }
@@ -124,37 +118,39 @@ export const createDisease = async (req, res) => {
 
 export const updateDisease = async (req, res) => {
   try {
-    const idx = db.diseases.findIndex(d => d.id === req.params.id);
-    if (idx === -1) return error(res, 'Diagnosis record not found.', 404);
+    const existing = await Disease.findById(req.params.id).lean();
+    if (!existing) return error(res, 'Diagnosis record not found.', 404);
 
     const { patient, patientId, doctor, code, name, category, severity, date, notes, status } = req.body;
-    const existing = db.diseases[idx];
 
-    db.diseases[idx] = {
-      ...existing,
-      patient:   patient?.trim()   || existing.patient,
-      patientId: patientId !== undefined ? (patientId || null) : existing.patientId,
-      doctor:    doctor?.trim()    ?? existing.doctor,
-      code:      code?.trim()      ?? existing.code,
-      name:      name?.trim()      || existing.name,
-      category:  category?.trim()  || existing.category,
-      severity:  severity?.trim()  || existing.severity,
-      date:      date              || existing.date,
-      notes:     notes?.trim()     ?? existing.notes,
-      status:    status            || existing.status,
-      updatedBy: req.user.username,
-      updatedAt: new Date().toISOString(),
-    };
+    const updated = await Disease.findByIdAndUpdate(
+      req.params.id,
+      {
+        patient:   patient?.trim()   || existing.patient,
+        patientId: patientId !== undefined ? (patientId || null) : existing.patientId,
+        doctor:    doctor?.trim()    ?? existing.doctor,
+        code:      code?.trim()      ?? existing.code,
+        name:      name?.trim()      || existing.name,
+        category:  category?.trim()  || existing.category,
+        severity:  severity?.trim()  || existing.severity,
+        date:      date              || existing.date,
+        notes:     notes?.trim()     ?? existing.notes,
+        status:    status            || existing.status,
+        updatedBy: req.user.username,
+        updatedAt: new Date().toISOString(),
+      },
+      { returnDocument: 'after' }
+    ).lean();
 
-    addActivity({
+    await addActivity({
       icon:        'fa-file-pen',
       color:       '#F6C343',
-      text:        `Diagnosis "${db.diseases[idx].name}" updated`,
-      detail:      `Patient: ${db.diseases[idx].patient || 'Unknown'} · ${db.diseases[idx].status}`,
+      text:        `Diagnosis "${updated.name}" updated`,
+      detail:      `Patient: ${updated.patient || 'Unknown'} · ${updated.status}`,
       performedBy: req.user.username,
     });
 
-    return success(res, db.diseases[idx], 'Diagnosis updated successfully');
+    return success(res, toApi(updated), 'Diagnosis updated successfully');
   } catch (err) {
     return error(res, 'Failed to update diagnosis.', 500);
   }
@@ -162,12 +158,10 @@ export const updateDisease = async (req, res) => {
 
 export const deleteDisease = async (req, res) => {
   try {
-    const idx = db.diseases.findIndex(d => d.id === req.params.id);
-    if (idx === -1) return error(res, 'Diagnosis record not found.', 404);
+    const removed = await Disease.findByIdAndDelete(req.params.id).lean();
+    if (!removed) return error(res, 'Diagnosis record not found.', 404);
 
-    const [removed] = db.diseases.splice(idx, 1);
-
-    addActivity({
+    await addActivity({
       icon:        'fa-file-circle-minus',
       color:       '#E63757',
       text:        `Diagnosis "${removed.name}" removed`,

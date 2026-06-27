@@ -1,7 +1,7 @@
-import { randomUUID as uuidv4 } from 'crypto';
 import bcrypt from 'bcryptjs';
 import jwt    from 'jsonwebtoken';
-import db     from '../db/db.js';
+import User   from '../models/User.js';
+import { addActivity } from '../utils/activity.js';
 
 const TOKEN_EXPIRY = '8h';
 
@@ -11,11 +11,6 @@ const success = (res, data = null, message = 'Success', statusCode = 200) =>
 const error = (res, message = 'An error occurred', statusCode = 500) =>
   res.status(statusCode).json({ success: false, message });
 
-const addActivity = ({ icon, color, text, detail, performedBy = 'system' }) => {
-  db.activityLog.unshift({ id: uuidv4(), icon, color, text, detail, performedBy, timestamp: new Date().toISOString() });
-  if (db.activityLog.length > 100) db.activityLog.length = 100;
-};
-
 export const login = async (req, res) => {
   try {
     const { username, password } = req.body;
@@ -24,7 +19,7 @@ export const login = async (req, res) => {
       return error(res, 'Username and password are required.', 400);
     }
 
-    const user = db.users.find(u => u.username === username.trim());
+    const user = await User.findOne({ username: username.trim() }).lean();
     if (!user) {
       return error(res, 'Invalid username or password.', 401);
     }
@@ -35,7 +30,7 @@ export const login = async (req, res) => {
     }
 
     const tokenPayload = {
-      id:       user.id,
+      id:       user._id,
       username: user.username,
       role:     user.role,
       doctorId: user.doctorId || null,
@@ -43,7 +38,7 @@ export const login = async (req, res) => {
 
     const token = jwt.sign(tokenPayload, process.env.JWT_SECRET, { expiresIn: TOKEN_EXPIRY });
 
-    addActivity({
+    await addActivity({
       icon:        'fa-right-to-bracket',
       color:       '#2C7BE5',
       text:        `${user.username} logged in`,

@@ -1,5 +1,8 @@
-import { randomUUID as uuidv4 } from 'crypto';
-import db from '../db/db.js';
+import DiseaseRequest from '../models/DiseaseRequest.js';
+import DiseaseCatalog from '../models/DiseaseCatalog.js';
+import Disease         from '../models/Disease.js';
+import { addActivity } from '../utils/activity.js';
+import { toApi, toApiList, escapeRegExp } from '../utils/serialize.js';
 
 const success = (res, data = null, message = 'Success', statusCode = 200) =>
   res.status(statusCode).json({ success: true, message, data });
@@ -7,21 +10,16 @@ const success = (res, data = null, message = 'Success', statusCode = 200) =>
 const error = (res, message = 'An error occurred', statusCode = 500) =>
   res.status(statusCode).json({ success: false, message });
 
-const addActivity = ({ icon, color, text, detail, performedBy = 'system' }) => {
-  db.activityLog.unshift({ id: uuidv4(), icon, color, text, detail, performedBy, timestamp: new Date().toISOString() });
-  if (db.activityLog.length > 100) db.activityLog.length = 100;
-};
-
 export const getAllRequests = async (req, res) => {
   try {
     const { status } = req.query;
-    let result = [...db.diseaseRequests].sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
 
-    if (status) {
-      result = result.filter(r => r.status === status);
-    }
+    const filter = {};
+    if (status) filter.status = status;
 
-    return success(res, result, 'Disease requests retrieved successfully');
+    const result = await DiseaseRequest.find(filter).sort({ createdAt: -1 }).lean();
+
+    return success(res, toApiList(result), 'Disease requests retrieved successfully');
   } catch (err) {
     return error(res, 'Failed to retrieve disease requests.', 500);
   }
@@ -35,8 +33,7 @@ export const submitDiseaseRequest = async (req, res) => {
       return error(res, 'Requested disease name is required.', 400);
     }
 
-    const newRequest = {
-      id:                   uuidv4(),
+    const newRequest = await DiseaseRequest.create({
       requestedDiseaseName: requestedDiseaseName.trim(),
       requestedByDoctor:    req.user.username,
       doctorName:           doctorName?.trim() || req.user.username,
@@ -45,11 +42,9 @@ export const submitDiseaseRequest = async (req, res) => {
       adminResponse:        '',
       createdAt:            new Date().toISOString(),
       updatedAt:            null,
-    };
+    });
 
-    db.diseaseRequests.push(newRequest);
-
-    addActivity({
+    await addActivity({
       icon:        'fa-circle-question',
       color:       '#F6C343',
       text:        `Disease request: "${newRequest.requestedDiseaseName}"`,
@@ -57,7 +52,7 @@ export const submitDiseaseRequest = async (req, res) => {
       performedBy: req.user.username,
     });
 
-    return success(res, newRequest, 'Disease request submitted successfully. Waiting for admin approval.', 201);
+    return success(res, toApi(newRequest.toObject()), 'Disease request submitted successfully. Waiting for admin approval.', 201);
   } catch (err) {
     return error(res, 'Failed to submit disease request.', 500);
   }
@@ -65,10 +60,9 @@ export const submitDiseaseRequest = async (req, res) => {
 
 export const approveRequest = async (req, res) => {
   try {
-    const idx = db.diseaseRequests.findIndex(r => r.id === req.params.id);
-    if (idx === -1) return error(res, 'Disease request not found.', 404);
+    const request = await DiseaseRequest.findById(req.params.id).lean();
+    if (!request) return error(res, 'Disease request not found.', 404);
 
-    const request = db.diseaseRequests[idx];
     if (request.status !== 'pending') {
       return error(res, 'This request has already been processed.', 400);
     }
@@ -78,29 +72,32 @@ export const approveRequest = async (req, res) => {
     const resolvedIcdCode  = icdCode?.trim()  || request.suggestedIcdCode  || '';
     const resolvedCategory = category?.trim() || request.suggestedCategory || 'Other';
 
-    db.diseaseRequests[idx] = {
-      ...request,
-      status:        'approved',
-      adminResponse: (adminResponse || '').trim(),
-      approvedBy:    req.user.username,
-      updatedAt:     new Date().toISOString(),
-    };
+    const updatedRequest = await DiseaseRequest.findByIdAndUpdate(
+      req.params.id,
+      {
+        status:        'approved',
+        adminResponse: (adminResponse || '').trim(),
+        approvedBy:    req.user.username,
+        updatedAt:     new Date().toISOString(),
+      },
+      { returnDocument: 'after' }
+    ).lean();
 
     if (request.diagnosisId) {
-      const diagIdx = db.diseases.findIndex(d => d.id === request.diagnosisId);
-      if (diagIdx !== -1) {
-        db.diseases[diagIdx].diseaseRequestPending = false;
-        db.diseases[diagIdx].diseaseRequestStatus  = 'approved';
-      }
+      await Disease.findByIdAndUpdate(request.diagnosisId, {
+        diseaseRequestPending: false,
+        diseaseRequestStatus:  'approved',
+      });
     }
 
     if (addToCatalog !== false) {
       const normalizedName = request.requestedDiseaseName.toLowerCase();
-      const alreadyInCatalog = db.diseasesCatalog.some(d => d.name.toLowerCase() === normalizedName);
+      const alreadyInCatalog = await DiseaseCatalog.exists({
+        name: new RegExp(`^${escapeRegExp(normalizedName)}$`, 'i'),
+      });
 
       if (!alreadyInCatalog) {
-        db.diseasesCatalog.push({
-          id:          uuidv4(),
+        await DiseaseCatalog.create({
           name:        request.requestedDiseaseName,
           icdCode:     resolvedIcdCode,
           category:    resolvedCategory,
@@ -113,7 +110,7 @@ export const approveRequest = async (req, res) => {
       }
     }
 
-    addActivity({
+    await addActivity({
       icon:        'fa-circle-check',
       color:       '#00C875',
       text:        `Disease request approved: "${request.requestedDiseaseName}"`,
@@ -121,7 +118,7 @@ export const approveRequest = async (req, res) => {
       performedBy: req.user.username,
     });
 
-    return success(res, db.diseaseRequests[idx], 'Disease request approved successfully');
+    return success(res, toApi(updatedRequest), 'Disease request approved successfully');
   } catch (err) {
     return error(res, 'Failed to approve disease request.', 500);
   }
@@ -129,33 +126,34 @@ export const approveRequest = async (req, res) => {
 
 export const rejectRequest = async (req, res) => {
   try {
-    const idx = db.diseaseRequests.findIndex(r => r.id === req.params.id);
-    if (idx === -1) return error(res, 'Disease request not found.', 404);
+    const request = await DiseaseRequest.findById(req.params.id).lean();
+    if (!request) return error(res, 'Disease request not found.', 404);
 
-    const request = db.diseaseRequests[idx];
     if (request.status !== 'pending') {
       return error(res, 'This request has already been processed.', 400);
     }
 
     const { adminResponse } = req.body;
 
-    db.diseaseRequests[idx] = {
-      ...request,
-      status:        'rejected',
-      adminResponse: (adminResponse || '').trim(),
-      rejectedBy:    req.user.username,
-      updatedAt:     new Date().toISOString(),
-    };
+    const updatedRequest = await DiseaseRequest.findByIdAndUpdate(
+      req.params.id,
+      {
+        status:        'rejected',
+        adminResponse: (adminResponse || '').trim(),
+        rejectedBy:    req.user.username,
+        updatedAt:     new Date().toISOString(),
+      },
+      { returnDocument: 'after' }
+    ).lean();
 
     if (request.diagnosisId) {
-      const diagIdx = db.diseases.findIndex(d => d.id === request.diagnosisId);
-      if (diagIdx !== -1) {
-        db.diseases[diagIdx].diseaseRequestPending = false;
-        db.diseases[diagIdx].diseaseRequestStatus  = 'rejected';
-      }
+      await Disease.findByIdAndUpdate(request.diagnosisId, {
+        diseaseRequestPending: false,
+        diseaseRequestStatus:  'rejected',
+      });
     }
 
-    addActivity({
+    await addActivity({
       icon:        'fa-circle-xmark',
       color:       '#E63757',
       text:        `Disease request rejected: "${request.requestedDiseaseName}"`,
@@ -163,7 +161,7 @@ export const rejectRequest = async (req, res) => {
       performedBy: req.user.username,
     });
 
-    return success(res, db.diseaseRequests[idx], 'Disease request rejected');
+    return success(res, toApi(updatedRequest), 'Disease request rejected');
   } catch (err) {
     return error(res, 'Failed to reject disease request.', 500);
   }

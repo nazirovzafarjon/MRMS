@@ -1,6 +1,8 @@
-import { randomUUID as uuidv4 } from 'crypto';
 import bcrypt from 'bcryptjs';
-import db     from '../db/db.js';
+import Doctor from '../models/Doctor.js';
+import User   from '../models/User.js';
+import { addActivity } from '../utils/activity.js';
+import { toApi, toApiList } from '../utils/serialize.js';
 
 const SALT_ROUNDS = 10;
 
@@ -10,15 +12,10 @@ const success = (res, data = null, message = 'Success', statusCode = 200) =>
 const error = (res, message = 'An error occurred', statusCode = 500) =>
   res.status(statusCode).json({ success: false, message });
 
-const addActivity = ({ icon, color, text, detail, performedBy = 'system' }) => {
-  db.activityLog.unshift({ id: uuidv4(), icon, color, text, detail, performedBy, timestamp: new Date().toISOString() });
-  if (db.activityLog.length > 100) db.activityLog.length = 100;
-};
-
 export const getAllDoctors = async (req, res) => {
   try {
     const { search } = req.query;
-    let result = [...db.doctors];
+    let result = await Doctor.find().lean();
 
     if (search) {
       const q = search.toLowerCase().trim();
@@ -29,7 +26,7 @@ export const getAllDoctors = async (req, res) => {
       );
     }
 
-    return success(res, result, 'Doctors retrieved successfully');
+    return success(res, toApiList(result), 'Doctors retrieved successfully');
   } catch (err) {
     return error(res, 'Failed to retrieve doctors.', 500);
   }
@@ -37,10 +34,10 @@ export const getAllDoctors = async (req, res) => {
 
 export const getDoctorById = async (req, res) => {
   try {
-    const doctor = db.doctors.find(d => d.id === req.params.id);
+    const doctor = await Doctor.findById(req.params.id).lean();
     if (!doctor) return error(res, 'Doctor not found.', 404);
 
-    return success(res, doctor, 'Doctor retrieved successfully');
+    return success(res, toApi(doctor), 'Doctor retrieved successfully');
   } catch (err) {
     return error(res, 'Failed to retrieve doctor.', 500);
   }
@@ -60,7 +57,7 @@ export const createDoctor = async (req, res) => {
         return error(res, 'Password is required when a username is provided.', 400);
       }
 
-      const usernameAlreadyTaken = db.users.some(u => u.username === username.trim());
+      const usernameAlreadyTaken = await User.exists({ username: username.trim() });
       if (usernameAlreadyTaken) {
         return error(res, `Username "${username.trim()}" is already taken. Please choose a different one.`, 400);
       }
@@ -68,10 +65,7 @@ export const createDoctor = async (req, res) => {
       doctorUsername = username.trim();
     }
 
-    const newDoctorId = uuidv4();
-
-    const newDoctor = {
-      id:             newDoctorId,
+    const newDoctor = await Doctor.create({
       name:           name.trim(),
       specialization: specialization.trim(),
       email:          email.trim(),
@@ -85,22 +79,19 @@ export const createDoctor = async (req, res) => {
       createdAt:      new Date().toISOString(),
       updatedBy:      null,
       updatedAt:      null,
-    };
-
-    db.doctors.push(newDoctor);
+    });
 
     if (doctorUsername) {
       const hashedPassword = await bcrypt.hash(password.trim(), SALT_ROUNDS);
-      db.users.push({
-        id:       uuidv4(),
+      await User.create({
         username: doctorUsername,
         password: hashedPassword,
         role:     'doctor',
-        doctorId: newDoctorId,
+        doctorId: newDoctor._id,
       });
     }
 
-    addActivity({
+    await addActivity({
       icon:        'fa-user-doctor',
       color:       '#6741d9',
       text:        `Dr. profile created: ${newDoctor.name}`,
@@ -108,7 +99,7 @@ export const createDoctor = async (req, res) => {
       performedBy: req.user.username,
     });
 
-    return success(res, newDoctor, 'Doctor created successfully', 201);
+    return success(res, toApi(newDoctor.toObject()), 'Doctor created successfully', 201);
   } catch (err) {
     return error(res, 'Failed to create doctor.', 500);
   }
@@ -116,35 +107,37 @@ export const createDoctor = async (req, res) => {
 
 export const updateDoctor = async (req, res) => {
   try {
-    const idx = db.doctors.findIndex(d => d.id === req.params.id);
-    if (idx === -1) return error(res, 'Doctor not found.', 404);
+    const existing = await Doctor.findById(req.params.id).lean();
+    if (!existing) return error(res, 'Doctor not found.', 404);
 
     const { name, specialization, email, phone, department, status, joinDate, patients } = req.body;
-    const existing = db.doctors[idx];
 
-    db.doctors[idx] = {
-      ...existing,
-      name:           name?.trim()           || existing.name,
-      specialization: specialization?.trim() || existing.specialization,
-      email:          email?.trim()          || existing.email,
-      phone:          phone?.trim()          ?? existing.phone,
-      department:     department?.trim()     || existing.department,
-      status:         status                 || existing.status,
-      joinDate:       joinDate               || existing.joinDate,
-      patients:       patients !== undefined ? parseInt(patients) : existing.patients,
-      updatedBy:      req.user.username,
-      updatedAt:      new Date().toISOString(),
-    };
+    const updated = await Doctor.findByIdAndUpdate(
+      req.params.id,
+      {
+        name:           name?.trim()           || existing.name,
+        specialization: specialization?.trim() || existing.specialization,
+        email:          email?.trim()          || existing.email,
+        phone:          phone?.trim()          ?? existing.phone,
+        department:     department?.trim()     || existing.department,
+        status:         status                 || existing.status,
+        joinDate:       joinDate               || existing.joinDate,
+        patients:       patients !== undefined ? parseInt(patients) : existing.patients,
+        updatedBy:      req.user.username,
+        updatedAt:      new Date().toISOString(),
+      },
+      { returnDocument: 'after' }
+    ).lean();
 
-    addActivity({
+    await addActivity({
       icon:        'fa-user-pen',
       color:       '#2C7BE5',
-      text:        `${db.doctors[idx].name} profile updated`,
-      detail:      `${db.doctors[idx].specialization} · status: ${db.doctors[idx].status}`,
+      text:        `${updated.name} profile updated`,
+      detail:      `${updated.specialization} · status: ${updated.status}`,
       performedBy: req.user.username,
     });
 
-    return success(res, db.doctors[idx], 'Doctor updated successfully');
+    return success(res, toApi(updated), 'Doctor updated successfully');
   } catch (err) {
     return error(res, 'Failed to update doctor.', 500);
   }
@@ -152,17 +145,12 @@ export const updateDoctor = async (req, res) => {
 
 export const deleteDoctor = async (req, res) => {
   try {
-    const idx = db.doctors.findIndex(d => d.id === req.params.id);
-    if (idx === -1) return error(res, 'Doctor not found.', 404);
+    const removed = await Doctor.findByIdAndDelete(req.params.id).lean();
+    if (!removed) return error(res, 'Doctor not found.', 404);
 
-    const [removed] = db.doctors.splice(idx, 1);
+    await User.deleteOne({ doctorId: removed._id });
 
-    const userIdx = db.users.findIndex(u => u.doctorId === removed.id);
-    if (userIdx !== -1) {
-      db.users.splice(userIdx, 1);
-    }
-
-    addActivity({
+    await addActivity({
       icon:        'fa-user-minus',
       color:       '#E63757',
       text:        `${removed.name} removed from the system`,
